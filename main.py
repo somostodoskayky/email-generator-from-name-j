@@ -88,7 +88,7 @@ def generate_email_patterns(first_name: str, last_name: str, domain: str) -> str
 # Run for CSV file
 # -------------------------------
 if __name__ == "__main__":
-    df = pd.read_csv("name.csv")
+    df = pd.read_csv("names.csv")
 
     emails = []
     for _, row in df.iterrows():
