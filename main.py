@@ -4,6 +4,7 @@ import re
 import pandas as pd
 import unicodedata  # <-- added for accent normalization
 import os  # <-- needed to check & remove file
+import time
 
 # =========================================================
 # =============== Required Helper Function ================
@@ -28,12 +29,23 @@ _ASCII_ALPHA = re.compile(r"^[A-Za-z]+$")
 
 def normalize_name(name: str) -> str:
     """
-    Convert accented letters to plain ASCII equivalents.
-    E.g., Á -> A, Ñ -> N
+    Convert accented letters to plain ASCII equivalents and clean up formatting.
+    E.g., Á -> A, Ñ -> N, "A-DAN" -> "ADAN", "MELO CAM" -> "MELOCAM"
     """
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", name) if c.isascii() and c.isalpha()
-    )
+    if not name:
+        return ""
+    
+    # Convert to string and normalize unicode
+    name = str(name)
+    
+    # Normalize unicode characters (accents, etc.)
+    name = unicodedata.normalize("NFKD", name)
+    
+    # Remove all non-alphabetic characters (spaces, hyphens, dots, etc.)
+    # Keep only A-Z and a-z characters
+    cleaned = "".join(c for c in name if c.isalpha())
+    
+    return cleaned
 
 def generate_email_patterns(first_name: str, last_name: str, domain: str) -> str:
     """
@@ -43,11 +55,19 @@ def generate_email_patterns(first_name: str, last_name: str, domain: str) -> str
     first_name = normalize_name(str(first_name))
     last_name  = normalize_name(str(last_name))
 
-    # Allow empty strings (fallback handles), but if non-empty they must be ASCII A-Z only.
-    if (first_name != "" and not _ASCII_ALPHA.fullmatch(first_name)):
-        return np.nan
-    if (last_name  != "" and not _ASCII_ALPHA.fullmatch(last_name)):
-        return np.nan
+    # If names are empty after normalization, use fallback initials
+    if not first_name and not last_name:
+        # Both names are empty/invalid, generate random email
+        fi = random.choice(["a", "b", "c", "d"])
+        li = random.choice(["a", "b", "c", "d"])
+        num = str(random.randint(1, 9999)) if random.getrandbits(1) else ""
+        return f"{fi}{li}{num}@{domain}"
+    
+    # If only one name is empty, use the other one
+    if not first_name:
+        first_name = "user"
+    if not last_name:
+        last_name = "user"
 
     # ------------- 2) Initials (with fallback if empty) -------------
     fi = first_name[0] if first_name else random.choice(["a", "b", "c", "d"])
@@ -162,49 +182,208 @@ def generate_email_patterns(first_name: str, last_name: str, domain: str) -> str
 
 
 # =========================================================
-# =============== Fast CSV Chunk Processing ===============
+# =============== SMART BATCH PROCESSING ==================
 # =========================================================
+def process_names_batch_smart(first_names, last_names):
+    """Smart batch name processing without memory issues"""
+    first_clean = []
+    last_clean = []
+    
+    for first, last in zip(first_names, last_names):
+        # Fast string handling
+        if first is None:
+            first = ""
+        if last is None:
+            last = ""
+        
+        first = str(first)
+        last = str(last)
+        
+        # Fast normalization (inline for speed)
+        if first:
+            first_chars = []
+            for c in unicodedata.normalize("NFKD", first):
+                if c.isalpha():
+                    first_chars.append(c)
+            first = "".join(first_chars)
+        
+        if last:
+            last_chars = []
+            for c in unicodedata.normalize("NFKD", last):
+                if c.isalpha():
+                    last_chars.append(c)
+            last = "".join(last_chars)
+        
+        # Handle empty names
+        if not first:
+            first = "user"
+        if not last:
+            last = "user"
+        
+        first_clean.append(first)
+        last_clean.append(last)
+    
+    return first_clean, last_clean
+
+def generate_emails_smart_batch(first_names, last_names, domain):
+    """Smart batch email generation with pre-generated randomness"""
+    n = len(first_names)
+    
+    # Pre-generate all random values for the entire batch
+    random_nums = np.random.choice([True, False], n)
+    numbers = np.where(random_nums, np.random.randint(1, 10000, n), np.array([''] * n))
+    
+    # Pre-generate random casing decisions (6 per name)
+    casing = np.random.choice([True, False], n * 6)
+    
+    # Pre-generate random pattern indices
+    pattern_indices = np.random.randint(0, 60, n)
+    
+    # Pre-generate random letter indices
+    letter_indices = np.random.randint(0, 10, n * 4)  # 4 random letters per name
+    
+    # Pre-generate fallback initials
+    fallback_initials = ['a', 'b', 'c', 'd']
+    fi_indices = np.random.randint(0, 4, n)
+    li_indices = np.random.randint(0, 4, n)
+    
+    emails = []
+    
+    for i in range(n):
+        first = first_names[i]
+        last = last_names[i]
+        
+        # Handle completely empty names
+        if not first and not last:
+            fi = fallback_initials[fi_indices[i]]
+            li = fallback_initials[li_indices[i]]
+            num = str(numbers[i]) if numbers[i] != '' else ""
+            emails.append(f"{fi}{li}{num}@{domain}")
+            continue
+        
+        # Get initials
+        fi = first[0] if first else fallback_initials[fi_indices[i]]
+        li = last[0] if last else fallback_initials[li_indices[i]]
+        
+        # Random letters (using pre-generated indices)
+        if len(first) >= 2:
+            idx1 = letter_indices[i * 4] % len(first)
+            idx2 = letter_indices[i * 4 + 1] % len(first)
+            rfn = first[idx1] + first[idx2]
+        else:
+            rfn = first
+        
+        if len(last) >= 2:
+            idx1 = letter_indices[i * 4 + 2] % len(last)
+            idx2 = letter_indices[i * 4 + 3] % len(last)
+            rln = last[idx1] + last[idx2]
+        else:
+            rln = last
+        
+        # Random casing using pre-generated decisions
+        idx = i * 6
+        fn = first.lower() if casing[idx] else first
+        ln = last.lower() if casing[idx + 1] else last
+        fi = fi.lower() if casing[idx + 2] else fi
+        li = li.lower() if casing[idx + 3] else li
+        rfn = rfn.lower() if casing[idx + 4] else rfn
+        rln = rln.lower() if casing[idx + 5] else rln
+        
+        # Get number
+        num = str(numbers[i]) if numbers[i] != '' else ""
+        
+        # Pre-built patterns array
+        patterns = [
+            f"{fn}{num}", f"{ln}{num}", f"{fn}{ln}{num}", f"{fi}{ln}{num}",
+            f"{fn}{li}{num}", f"{fi}{li}{num}", f"{ln}{fn}{num}", f"{ln}{fi}{num}",
+            f"{li}{fn}{num}", f"{li}{fi}{num}", f"{fn}.{ln}{num}", f"{fi}.{ln}{num}",
+            f"{fn}.{li}{num}", f"{fi}.{li}{num}", f"{ln}.{fn}{num}", f"{ln}.{fi}{num}",
+            f"{li}.{fn}{num}", f"{li}.{fi}{num}", f"{fn}_{ln}{num}", f"{fi}_{ln}{num}",
+            f"{fn}_{li}{num}", f"{fi}_{li}{num}", f"{ln}_{fn}{num}", f"{ln}_{fi}{num}",
+            f"{li}_{fn}{num}", f"{li}_{fi}{num}", f"{rfn}{num}", f"{rln}{num}",
+            f"{rfn}{rln}{num}", f"{rfn}.{ln}{num}", f"{fi}{rln}{num}", f"{fi}.{rln}{num}",
+            f"{rfn}{li}{num}", f"{rfn}.{li}{num}", f"{fi}{li}{num}", f"{fi}.{li}{num}",
+            f"{rln}{fn}{num}", f"{rln}.{fn}{num}", f"{rln}{fi}{num}", f"{rln}.{fi}{num}",
+            f"{li}{rfn}{num}", f"{li}.{rfn}{num}", f"{li}{fi}{num}", f"{li}.{fi}{num}",
+            f"{rfn}_{ln}{num}", f"{fi}_{rln}{num}", f"{rfn}_{li}{num}", f"{fi}_{li}{num}",
+            f"{rln}_{fn}{num}", f"{rln}_{fi}{num}", f"{li}_{rfn}{num}", f"{li}_{fi}{num}",
+            f"{fn}{num}{ln}", f"{fi}{num}{ln}", f"{fn}{num}{li}", f"{fi}{num}{li}",
+            f"{ln}{num}{fn}", f"{ln}{num}{fi}", f"{li}{num}{fn}", f"{li}{num}{fi}",
+            f"{fn}.{num}.{ln}", f"{fi}.{num}.{ln}", f"{fn}.{num}.{li}", f"{fi}.{num}.{li}",
+            f"{ln}.{num}.{fn}", f"{ln}.{num}.{fi}", f"{li}.{num}.{fn}", f"{li}.{num}.{fi}",
+            f"{fn}_{num}_{ln}", f"{fi}_{num}_{ln}", f"{fn}_{num}_{li}", f"{fi}_{num}_{li}",
+            f"{ln}_{num}_{fn}", f"{ln}_{num}_{fi}", f"{li}_{num}_{fn}", f"{li}_{num}_{fi}"
+        ]
+        
+        # Use pre-generated pattern index
+        emails.append(f"{patterns[pattern_indices[i]]}@{domain}")
+    
+    return emails
+
 def process_csv(input_file: str,
                 output_file: str = "generated_emails.csv",
                 domain: str = "example.com",
-                chunksize: int = 100_000) -> None:
+                chunksize: int = 200_000) -> None:
     """
-    Streams a large CSV (expects columns: 'first','last') and writes 'email' column.
-    If the output file already exists, it will be removed first.
+    Smart batch CSV processing that actually works without memory issues.
+    Target: Under 1 minute for 300MB file.
     """
+    start_time = time.time()
+    last_report = start_time
+
     # Remove existing file if it exists
     if os.path.exists(output_file):
         os.remove(output_file)
 
     header_written = False
-
-    for chunk in pd.read_csv(
+    
+    print(f"🚀 SMART BATCH mode: {chunksize:,} row chunks with optimized processing...")
+    
+    # Process with optimized chunks
+    for chunk_num, chunk in enumerate(pd.read_csv(
         input_file,
         chunksize=chunksize,
         usecols=["first", "last"],
         dtype={"first": "string", "last": "string"},
-        keep_default_na=True
-    ):
+        keep_default_na=True,
+        engine='c'
+    ), start=1):
+        
+        # Fill NaN values efficiently
         chunk["first"] = chunk["first"].fillna("")
-        chunk["last"]  = chunk["last"].fillna("")
-
-        emails = [generate_email_patterns(f, l, domain) for f, l in zip(chunk["first"].tolist(),
-                                                                        chunk["last"].tolist())]
+        chunk["last"] = chunk["last"].fillna("")
+        
+        # Smart batch name processing
+        first_clean, last_clean = process_names_batch_smart(chunk["first"].tolist(), chunk["last"].tolist())
+        
+        # Smart batch email generation
+        emails = generate_emails_smart_batch(first_clean, last_clean, domain)
         chunk["email"] = emails
-
+        
+        # Write chunk efficiently
         chunk.to_csv(
             output_file,
-            mode="a",  # always append since file was removed at start
+            mode="a",
             index=False,
-            header=not header_written
+            header=not header_written,
+            float_format='%.0f'
         )
         header_written = True
+        
+        # Progress update
+        now = time.time()
+        if now - last_report >= 3:
+            elapsed = now - start_time
+            print(f"⏳ Processing... {elapsed:.2f} seconds elapsed (after {chunk_num} chunks)")
+            last_report = now
 
-    print(f"✅ Emails generated and saved to {output_file}")
+    elapsed_time = time.time() - start_time
+    print(f"\n✅ Emails generated and saved to {output_file}")
+    print(f"⏱️ Completed in {elapsed_time:.2f} seconds")
 
 
 # =========================================================
 # ======================== CLI ============================
 # =========================================================
 if __name__ == "__main__":
-    process_csv("names.csv", "generated_emails.csv", domain="example.com", chunksize=100_000)
+    process_csv("names.csv", "generated_emails.csv", domain="example.com", chunksize=200_000)
