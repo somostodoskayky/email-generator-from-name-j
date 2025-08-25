@@ -7,41 +7,17 @@ import os
 import time
 
 # =========================================================
-# =============== Required Helper Function ================
-# =========================================================
-def get_random_letters(name: str, count: int = 2) -> str:
-    """Return up to `count` random letters from name (no replacement)."""
-    if not name:
-        return ""
-    name = str(name)
-    n = len(name)
-    if n <= count:
-        return name
-    # Use random.sample efficiently
-    return "".join(random.sample(name, count))
-
-
-# =========================================================
-# =============== Required Main Function ==================
-# =========================================================
-def normalize_name(name: str) -> str:
-    """Normalize accented names and remove non-letters."""
-    if not name:
-        return ""
-    name = str(name)
-    # NFKD + filter alpha, faster with join and generator
-    return "".join(c for c in unicodedata.normalize("NFKD", name) if c.isalpha())
-
-
-# =========================================================
 # =============== SMART BATCH PROCESSING ==================
 # =========================================================
+def normalize_safe(name: str, _norm=unicodedata.normalize, _isalpha=str.isalpha) -> str:
+    if not name:
+        return "user"
+    normalized = _norm("NFKD", str(name))
+    letters = [c for c in normalized if _isalpha(c)]
+    return "".join(letters) or "user"
+
 def process_names_batch_smart(first_names, last_names):
-    """Smart batch name processing without memory issues (Polars compatible)."""
-    # Use list comprehension + normalize_name function (much faster)
-    first_clean = [normalize_name(x) or "user" for x in first_names]
-    last_clean  = [normalize_name(x) or "user" for x in last_names]
-    return first_clean, last_clean
+    return [normalize_safe(f) for f in first_names], [normalize_safe(l) for l in last_names]
 
 
 def generate_emails_smart_batch(first_names, last_names, domain):
@@ -211,9 +187,12 @@ def process_csv(input_file: str,
     first_list = df_pl["first"].to_list()
     last_list  = df_pl["last"].to_list()
 
+    print(f"{len(first_list):.2f} seconds")
     # Apply your original logic
     first_clean, last_clean = process_names_batch_smart(first_list, last_list)
+    print(f"⏱️ Completed in {time.time() - start_time:.2f} seconds")
     emails = generate_emails_smart_batch(first_clean, last_clean, domain)
+    print(f"⏱️ Completed in {time.time() - start_time:.2f} seconds")
 
     # Add emails back to Polars DataFrame
     df_pl = df_pl.with_columns(pl.Series("email", emails))
