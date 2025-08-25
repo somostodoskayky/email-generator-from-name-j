@@ -11,187 +11,175 @@ import time
 # =========================================================
 def get_random_letters(name: str, count: int = 2) -> str:
     """Return up to `count` random letters from name (no replacement)."""
-    name = str(name)
     if not name:
         return ""
-    return "".join(random.sample(name, min(len(name), count)))
+    name = str(name)
+    n = len(name)
+    if n <= count:
+        return name
+    # Use random.sample efficiently
+    return "".join(random.sample(name, count))
 
 
 # =========================================================
 # =============== Required Main Function ==================
 # =========================================================
-_ASCII_ALPHA = re.compile(r"^[A-Za-z]+$")
-
 def normalize_name(name: str) -> str:
     """Normalize accented names and remove non-letters."""
     if not name:
         return ""
     name = str(name)
-    name = unicodedata.normalize("NFKD", name)
-    return "".join(c for c in name if c.isalpha())
+    # NFKD + filter alpha, faster with join and generator
+    return "".join(c for c in unicodedata.normalize("NFKD", name) if c.isalpha())
 
 
 # =========================================================
 # =============== SMART BATCH PROCESSING ==================
 # =========================================================
 def process_names_batch_smart(first_names, last_names):
-    """Smart batch name processing without memory issues."""
-    first_clean, last_clean = [], []
-
-    for first, last in zip(first_names, last_names):
-        first = str(first) if first else ""
-        last  = str(last) if last else ""
-
-        first = "".join(c for c in unicodedata.normalize("NFKD", first) if c.isalpha())
-        last  = "".join(c for c in unicodedata.normalize("NFKD", last) if c.isalpha())
-
-        if not first:
-            first = "user"
-        if not last:
-            last = "user"
-
-        first_clean.append(first)
-        last_clean.append(last)
-
+    """Smart batch name processing without memory issues (Polars compatible)."""
+    # Use list comprehension + normalize_name function (much faster)
+    first_clean = [normalize_name(x) or "user" for x in first_names]
+    last_clean  = [normalize_name(x) or "user" for x in last_names]
     return first_clean, last_clean
 
 
 def generate_emails_smart_batch(first_names, last_names, domain):
-    """Smart batch email generation with pre-generated randomness."""
+    """Optimized memory-safe smart batch email generation with pattern lookup."""
+
     n = len(first_names)
 
+    first_arr = np.array(first_names, dtype=object)
+    last_arr  = np.array(last_names, dtype=object)
+    fallback_initials = np.array(['a', 'b', 'c', 'd'])
+
+    # ---------------- Precompute randomness ----------------
     random_nums = np.random.choice([True, False], n)
-    numbers = np.where(random_nums, np.random.randint(1, 10000, n), np.array([''] * n))
+    numbers = np.where(random_nums, np.random.randint(1, 10000, n).astype(str), np.array(['']*n))
 
-    casing = np.random.choice([True, False], n * 6)
-    pattern_indices = np.random.randint(0, 75, n)   # 75 patterns
-    letter_indices = np.random.randint(0, 10, n * 4)
+    casing = np.random.choice([True, False], n*6)
+    pattern_indices = np.random.randint(0, 75, n)
+    letter_indices = np.random.randint(0, 10, n*4)
 
-    fallback_initials = ['a', 'b', 'c', 'd']
     fi_indices = np.random.randint(0, 4, n)
     li_indices = np.random.randint(0, 4, n)
 
-    emails = []
+    # ---------------- Compute first & last initials ----------------
+    fi_arr = np.array([f[0] if f else fallback_initials[fi_indices[i]] for i, f in enumerate(first_arr)], dtype=object)
+    li_arr = np.array([l[0] if l else fallback_initials[li_indices[i]] for i, l in enumerate(last_arr)], dtype=object)
 
-    for i in range(n):
-        first = first_names[i]
-        last  = last_names[i]
+    # ---------------- Compute random 2-letter combos ----------------
+    def random_pair(arr, idx_base):
+        res = []
+        for i, s in enumerate(arr):
+            if len(s) >= 2:
+                idx1 = letter_indices[idx_base[i]] % len(s)
+                idx2 = letter_indices[idx_base[i]+1] % len(s)
+                res.append(s[idx1] + s[idx2])
+            else:
+                res.append(s)
+        return np.array(res, dtype=object)
 
-        # Empty names fallback
-        if not first and not last:
-            fi = fallback_initials[fi_indices[i]]
-            li = fallback_initials[li_indices[i]]
-            num = str(numbers[i]) if numbers[i] != '' else ""
-            emails.append(f"{fi}{li}{num}@{domain}")
-            continue
+    li_idx = np.arange(n) * 4
+    rfn_arr = random_pair(first_arr, li_idx)
+    rln_arr = random_pair(last_arr, li_idx + 2)
 
-        fi = first[0] if first else fallback_initials[fi_indices[i]]
-        li = last[0] if last else fallback_initials[li_indices[i]]
+    # ---------------- Apply casing safely ----------------
+    fn_arr  = np.array([s.lower() if c else s for s, c in zip(first_arr, casing[0::6])], dtype=object)
+    ln_arr  = np.array([s.lower() if c else s for s, c in zip(last_arr, casing[1::6])], dtype=object)
+    fi_arr  = np.array([s.lower() if c else s for s, c in zip(fi_arr, casing[2::6])], dtype=object)
+    li_arr  = np.array([s.lower() if c else s for s, c in zip(li_arr, casing[3::6])], dtype=object)
+    rfn_arr = np.array([s.lower() if c else s for s, c in zip(rfn_arr, casing[4::6])], dtype=object)
+    rln_arr = np.array([s.lower() if c else s for s, c in zip(rln_arr, casing[5::6])], dtype=object)
 
-        if len(first) >= 2:
-            idx1 = letter_indices[i * 4] % len(first)
-            idx2 = letter_indices[i * 4 + 1] % len(first)
-            rfn = first[idx1] + first[idx2]
-        else:
-            rfn = first
+    # ---------------- Precompute 75 pattern functions ----------------
+    # Each lambda takes fn, ln, fi, li, rfn, rln, num and returns local part
+    patterns = [
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}{ln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}{ln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}{fn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}{fn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}.{ln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}.{ln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}.{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}.{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}.{fn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}.{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}.{fn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}.{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}_{ln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}_{ln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}_{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}_{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}_{fn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}_{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{fn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rfn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rfn}{rln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rfn}.{ln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}{rln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}.{rln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rfn}{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rfn}.{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}.{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rln}{fn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rln}.{fn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rln}{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rln}.{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}{rfn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}.{rfn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}.{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rfn}_{ln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}_{rln}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rfn}_{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}_{li}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rln}_{fn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{rln}_{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{rfn}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{fi}{num}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}{num}{ln}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}{num}{ln}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}{num}{li}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}{num}{li}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}{num}{fn}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}{num}{fi}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}{num}{fn}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}{num}{fi}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}.{num}.{ln}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}.{num}.{ln}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}.{num}.{li}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}.{num}.{li}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}.{num}.{fn}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}.{num}.{fi}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}.{num}.{fn}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}.{num}.{fi}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}_{num}_{ln}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}_{num}_{ln}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fn}_{num}_{li}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{fi}_{num}_{li}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}_{num}_{fn}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{ln}_{num}_{fi}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{num}_{fn}",
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{num}_{fi}"
+    ]
 
-        if len(last) >= 2:
-            idx1 = letter_indices[i * 4 + 2] % len(last)
-            idx2 = letter_indices[i * 4 + 3] % len(last)
-            rln = last[idx1] + last[idx2]
-        else:
-            rln = last
-
-        idx = i * 6
-        fn  = first.lower() if casing[idx] else first
-        ln  = last.lower()  if casing[idx + 1] else last
-        fi  = fi.lower()    if casing[idx + 2] else fi
-        li  = li.lower()    if casing[idx + 3] else li
-        rfn = rfn.lower()   if casing[idx + 4] else rfn
-        rln = rln.lower()   if casing[idx + 5] else rln
-
-        num = str(numbers[i]) if numbers[i] != '' else ""
-
-        # Select pattern (75 possibilities)
-        p = pattern_indices[i]
-        if p == 0:   local = f"{fn}{num}"
-        elif p == 1: local = f"{ln}{num}"
-        elif p == 2: local = f"{fn}{ln}{num}"
-        elif p == 3: local = f"{fi}{ln}{num}"
-        elif p == 4: local = f"{fn}{li}{num}"
-        elif p == 5: local = f"{fi}{li}{num}"
-        elif p == 6: local = f"{ln}{fn}{num}"
-        elif p == 7: local = f"{ln}{fi}{num}"
-        elif p == 8: local = f"{li}{fn}{num}"
-        elif p == 9: local = f"{li}{fi}{num}"
-        elif p == 10: local = f"{fn}.{ln}{num}"
-        elif p == 11: local = f"{fi}.{ln}{num}"
-        elif p == 12: local = f"{fn}.{li}{num}"
-        elif p == 13: local = f"{fi}.{li}{num}"
-        elif p == 14: local = f"{ln}.{fn}{num}"
-        elif p == 15: local = f"{ln}.{fi}{num}"
-        elif p == 16: local = f"{li}.{fn}{num}"
-        elif p == 17: local = f"{li}.{fi}{num}"
-        elif p == 18: local = f"{fn}_{ln}{num}"
-        elif p == 19: local = f"{fi}_{ln}{num}"
-        elif p == 20: local = f"{fn}_{li}{num}"
-        elif p == 21: local = f"{fi}_{li}{num}"
-        elif p == 22: local = f"{ln}_{fn}{num}"
-        elif p == 23: local = f"{ln}_{fi}{num}"
-        elif p == 24: local = f"{li}_{fn}{num}"
-        elif p == 25: local = f"{li}_{fi}{num}"
-        elif p == 26: local = f"{rfn}{num}"
-        elif p == 27: local = f"{rln}{num}"
-        elif p == 28: local = f"{rfn}{rln}{num}"
-        elif p == 29: local = f"{rfn}.{ln}{num}"
-        elif p == 30: local = f"{fi}{rln}{num}"
-        elif p == 31: local = f"{fi}.{rln}{num}"
-        elif p == 32: local = f"{rfn}{li}{num}"
-        elif p == 33: local = f"{rfn}.{li}{num}"
-        elif p == 34: local = f"{fi}{li}{num}"
-        elif p == 35: local = f"{fi}.{li}{num}"
-        elif p == 36: local = f"{rln}{fn}{num}"
-        elif p == 37: local = f"{rln}.{fn}{num}"
-        elif p == 38: local = f"{rln}{fi}{num}"
-        elif p == 39: local = f"{rln}.{fi}{num}"
-        elif p == 40: local = f"{li}{rfn}{num}"
-        elif p == 41: local = f"{li}.{rfn}{num}"
-        elif p == 42: local = f"{li}{fi}{num}"
-        elif p == 43: local = f"{li}.{fi}{num}"
-        elif p == 44: local = f"{rfn}_{ln}{num}"
-        elif p == 45: local = f"{fi}_{rln}{num}"
-        elif p == 46: local = f"{rfn}_{li}{num}"
-        elif p == 47: local = f"{fi}_{li}{num}"
-        elif p == 48: local = f"{rln}_{fn}{num}"
-        elif p == 49: local = f"{rln}_{fi}{num}"
-        elif p == 50: local = f"{li}_{rfn}{num}"
-        elif p == 51: local = f"{li}_{fi}{num}"
-        elif p == 52: local = f"{fn}{num}{ln}"
-        elif p == 53: local = f"{fi}{num}{ln}"
-        elif p == 54: local = f"{fn}{num}{li}"
-        elif p == 55: local = f"{fi}{num}{li}"
-        elif p == 56: local = f"{ln}{num}{fn}"
-        elif p == 57: local = f"{ln}{num}{fi}"
-        elif p == 58: local = f"{li}{num}{fn}"
-        elif p == 59: local = f"{li}{num}{fi}"
-        elif p == 60: local = f"{fn}.{num}.{ln}"
-        elif p == 61: local = f"{fi}.{num}.{ln}"
-        elif p == 62: local = f"{fn}.{num}.{li}"
-        elif p == 63: local = f"{fi}.{num}.{li}"
-        elif p == 64: local = f"{ln}.{num}.{fn}"
-        elif p == 65: local = f"{ln}.{num}.{fi}"
-        elif p == 66: local = f"{li}.{num}.{fn}"
-        elif p == 67: local = f"{li}.{num}.{fi}"
-        elif p == 68: local = f"{fn}_{num}_{ln}"
-        elif p == 69: local = f"{fi}_{num}_{ln}"
-        elif p == 70: local = f"{fn}_{num}_{li}"
-        elif p == 71: local = f"{fi}_{num}_{li}"
-        elif p == 72: local = f"{ln}_{num}_{fn}"
-        elif p == 73: local = f"{ln}_{num}_{fi}"
-        elif p == 74: local = f"{li}_{num}_{fn}"
-        else:        local = f"{li}_{num}_{fi}"
-
-        emails.append(f"{local}@{domain}")
+    # ---------------- Generate emails ----------------
+    emails = np.array([
+        patterns[p](fn_arr[i], ln_arr[i], fi_arr[i], li_arr[i], rfn_arr[i], rln_arr[i], numbers[i]) + f"@{domain}"
+        if first_arr[i] or last_arr[i] else
+        f"{fi_arr[i]}{li_arr[i]}{numbers[i]}@{domain}"
+        for i, p in enumerate(pattern_indices)
+    ], dtype=object)
 
     return emails
 
@@ -202,27 +190,36 @@ def generate_emails_smart_batch(first_names, last_names, domain):
 def process_csv(input_file: str,
                 output_file: str = "generated_emails.csv",
                 domain: str = "example.com") -> None:
-    """High-performance CSV processing using Polars only."""
+    """High-performance CSV processing using Polars (logic preserved)."""
     start_time = time.time()
 
     if os.path.exists(output_file):
         os.remove(output_file)
 
-    print("🚀 POLARS fast path: single read/process/write...")
+    print("🚀 POLARS fast path (original email logic preserved)")
+
+    # Read CSV (only needed columns)
     df_pl = pl.read_csv(input_file, columns=["first", "last"], infer_schema_length=0)
+
+    # Clean columns
     df_pl = df_pl.with_columns([
         pl.col("first").cast(pl.Utf8, strict=False).fill_null(""),
         pl.col("last").cast(pl.Utf8, strict=False).fill_null("")
     ])
 
+    # Convert once to Python lists for your custom logic
     first_list = df_pl["first"].to_list()
     last_list  = df_pl["last"].to_list()
 
+    # Apply your original logic
     first_clean, last_clean = process_names_batch_smart(first_list, last_list)
     emails = generate_emails_smart_batch(first_clean, last_clean, domain)
 
-    out_pl = df_pl.with_columns(pl.Series("email", emails))
-    out_pl.write_csv(output_file)
+    # Add emails back to Polars DataFrame
+    df_pl = df_pl.with_columns(pl.Series("email", emails))
+
+    # Write to CSV
+    df_pl.write_csv(output_file)
 
     elapsed_time = time.time() - start_time
     print(f"\n✅ Emails generated and saved to {output_file}")
