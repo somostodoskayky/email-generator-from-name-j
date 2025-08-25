@@ -1,10 +1,10 @@
-import random
-import numpy as np
-import re
-import polars as pl
-import unicodedata
 import os
+import re
 import time
+import math
+import numpy as np
+import polars as pl
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # =========================================================
 # =============== SMART BATCH PROCESSING ==================
@@ -20,60 +20,80 @@ def normalize_safe(name: str) -> str:
 def process_names_batch_smart(first_names, last_names):
     return [normalize_safe(f) for f in first_names], [normalize_safe(l) for l in last_names]
 
+# ---------------- Worker-side generator ----------------
+def _generate_chunk(first_chunk, last_chunk, domain, seed):
+    # Each process gets its own RNG for independence & speed
+    rng = np.random.default_rng(seed)
 
-def generate_emails_smart_batch(first_names, last_names, domain):
-    """Fully optimized, memory-safe email generation keeping original logic."""
-    
-    n = len(first_names)
-    
-    first_arr = np.array(first_names, dtype=object)
-    last_arr  = np.array(last_names, dtype=object)
-    fallback_initials = np.array(['a', 'b', 'c', 'd'])
-    
-    # ---------------- Precompute randomness ----------------
-    random_nums = np.random.choice([True, False], n)
-    numbers = np.where(random_nums, np.random.randint(1, 10000, n).astype(str), np.array(['']*n))
-    
-    casing = np.random.choice([True, False], n*6)
-    pattern_indices = np.random.randint(0, 75, n)
-    letter_indices = np.random.randint(0, 10, n*4)
-    
-    fi_indices = np.random.randint(0, 4, n)
-    li_indices = np.random.randint(0, 4, n)
-    
-    # ---------------- Compute first & last initials ----------------
-    fi_arr = np.array([f[0] if f else fallback_initials[fi_indices[i]] for i, f in enumerate(first_arr)], dtype=object)
-    li_arr = np.array([l[0] if l else fallback_initials[li_indices[i]] for i, l in enumerate(last_arr)], dtype=object)
-    
-    # ---------------- Compute random 2-letter combos ----------------
-    li_idx = np.arange(n) * 4
-    def random_pair(arr, idx_base):
-        res = np.empty(n, dtype=object)
-        for i in range(n):
-            s = arr[i]
-            if len(s) >= 2:
-                idx1 = letter_indices[idx_base[i]] % len(s)
-                idx2 = letter_indices[idx_base[i]+1] % len(s)
-                res[i] = s[idx1] + s[idx2]
-            else:
-                res[i] = s
-        return res
-    
-    rfn_arr = random_pair(first_arr, li_idx)
-    rln_arr = random_pair(last_arr, li_idx + 2)
-    
-    # ---------------- Apply casing ----------------
-    def apply_casing(arr, flags):
-        return np.array([s.lower() if f else s for s,f in zip(arr, flags)], dtype=object)
-    
-    fn_arr  = apply_casing(first_arr, casing[0::6])
-    ln_arr  = apply_casing(last_arr, casing[1::6])
-    fi_arr  = apply_casing(fi_arr, casing[2::6])
-    li_arr  = apply_casing(li_arr, casing[3::6])
-    rfn_arr = apply_casing(rfn_arr, casing[4::6])
-    rln_arr = apply_casing(rln_arr, casing[5::6])
-    
-    # ---------------- Precompute 75 pattern functions ----------------
+    n = len(first_chunk)
+    first_arr = np.asarray(first_chunk, dtype=object)
+    last_arr  = np.asarray(last_chunk,  dtype=object)
+
+    fallback_initials = np.array(['a', 'b', 'c', 'd'], dtype=object)
+
+    # Precompute randomness
+    random_nums = rng.choice([True, False], n)
+    # numbers are strings when used, else empty string
+    numbers = np.where(random_nums,
+                       rng.integers(1, 10000, n).astype(str),
+                       np.empty(n, dtype=object))
+    numbers[~random_nums] = ""
+
+    # 6 casing flags per row (fn, ln, fi, li, rfn, rln)
+    casing = rng.choice([True, False], n * 6)
+    pattern_indices = rng.integers(0, 75, n)
+    letter_indices = rng.integers(0, 10, n * 4)  # reused in random pairs
+
+    fi_indices = rng.integers(0, 4, n)
+    li_indices = rng.integers(0, 4, n)
+
+    # First & last initials (with fallback)
+    fi_arr = np.empty(n, dtype=object)
+    li_arr = np.empty(n, dtype=object)
+    for i in range(n):
+        f = first_arr[i]
+        l = last_arr[i]
+        fi_arr[i] = (f[0] if f else fallback_initials[fi_indices[i]])
+        li_arr[i] = (l[0] if l else fallback_initials[li_indices[i]])
+
+    # Random two-letter combos
+    # Use the pre-drawn indices deterministically per row
+    base = np.arange(n) * 4
+    rfn_arr = np.empty(n, dtype=object)
+    rln_arr = np.empty(n, dtype=object)
+    for i in range(n):
+        f = first_arr[i]
+        l = last_arr[i]
+        if len(f) >= 2:
+            idx1 = letter_indices[base[i]]     % len(f)
+            idx2 = letter_indices[base[i] + 1] % len(f)
+            rfn_arr[i] = f[idx1] + f[idx2]
+        else:
+            rfn_arr[i] = f
+        if len(l) >= 2:
+            idx1 = letter_indices[base[i] + 2] % len(l)
+            idx2 = letter_indices[base[i] + 3] % len(l)
+            rln_arr[i] = l[idx1] + l[idx2]
+        else:
+            rln_arr[i] = l
+
+    # Apply casing flags (lower if flag True)
+    def lower_if(arr, flags):
+        out = np.empty(n, dtype=object)
+        # slicing the appropriate stride
+        it = flags
+        for i, s in enumerate(arr):
+            out[i] = (s.lower() if it[i] else s)
+        return out
+
+    fn_arr  = lower_if(first_arr, casing[0::6])
+    ln_arr  = lower_if(last_arr,  casing[1::6])
+    fi_arr  = lower_if(fi_arr,    casing[2::6])
+    li_arr  = lower_if(li_arr,    casing[3::6])
+    rfn_arr = lower_if(rfn_arr,   casing[4::6])
+    rln_arr = lower_if(rln_arr,   casing[5::6])
+
+    # 75 pattern functions (same logic preserved)
     patterns = [
         lambda fn, ln, fi, li, rfn, rln, num: f"{fn}{num}",
         lambda fn, ln, fi, li, rfn, rln, num: f"{ln}{num}",
@@ -150,37 +170,72 @@ def generate_emails_smart_batch(first_names, last_names, domain):
         lambda fn, ln, fi, li, rfn, rln, num: f"{ln}_{num}_{fn}",
         lambda fn, ln, fi, li, rfn, rln, num: f"{ln}_{num}_{fi}",
         lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{num}_{fn}",
-        lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{num}_{fi}"
+        lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{num}_{fi}",
     ]
-    
-    # ---------------- Generate emails ----------------
-    emails_local = np.array([
-        patterns[p](fn_arr[i], ln_arr[i], fi_arr[i], li_arr[i], rfn_arr[i], rln_arr[i], numbers[i])
-        if first_arr[i] or last_arr[i] else f"{fi_arr[i]}{li_arr[i]}{numbers[i]}"
-        for i, p in enumerate(pattern_indices)
-    ], dtype=object)
-    
-    # ---------------- Add domain ----------------
-    emails = np.char.add(emails_local, f"@{domain}")
-    
-    return emails
 
+    # Build locals per pattern (single Python loop over rows)
+    local_parts = np.empty(n, dtype=object)
+    for i in range(n):
+        if (first_arr[i] or last_arr[i]):
+            p = pattern_indices[i]
+            local_parts[i] = patterns[p](fn_arr[i], ln_arr[i], fi_arr[i], li_arr[i], rfn_arr[i], rln_arr[i], numbers[i])
+        else:
+            local_parts[i] = f"{fi_arr[i]}{li_arr[i]}{numbers[i]}"
+
+    return np.char.add(local_parts, f"@{domain}")
+
+def generate_emails_smart_batch_parallel(first_names, last_names, domain, workers=None, chunk_size=200_000, base_seed=12345):
+    """Parallel version preserving original behavior."""
+    n = len(first_names)
+    if n == 0:
+        return np.array([], dtype=object)
+
+    if workers is None:
+        workers = max(1, min(os.cpu_count() or 1, 16))  # cap a bit to avoid oversubscription
+
+    # Create chunks
+    chunks = []
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        chunks.append((start, end))
+
+    results = [None] * len(chunks)
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futures = []
+        for idx, (s, e) in enumerate(chunks):
+            # Give each chunk a distinct seed (stable but independent)
+            seed = base_seed + idx * 100_003
+            futures.append(
+                ex.submit(
+                    _generate_chunk,
+                    first_names[s:e],
+                    last_names[s:e],
+                    domain,
+                    seed
+                )
+            )
+        for i, fut in enumerate(as_completed(futures)):
+            results[i] = fut.result()
+
+    return np.concatenate(results)
 
 # =========================================================
 # ================= MAIN CSV PROCESSOR ====================
 # =========================================================
 def process_csv(input_file: str,
                 output_file: str = "generated_emails.csv",
-                domain: str = "example.com") -> None:
-    """High-performance CSV processing using Polars (logic preserved)."""
+                domain: str = "example.com",
+                workers: int | None = None,
+                chunk_size: int = 200_000) -> None:
+    """High-performance CSV processing using Polars + multiprocessing."""
     start_time = time.time()
 
     if os.path.exists(output_file):
         os.remove(output_file)
 
-    print("🚀 POLARS fast path (original email logic preserved)")
+    print("🚀 POLARS + multiprocess fast path (logic preserved)")
 
-    # Read CSV (only needed columns)
+    # Read only required columns
     df_pl = pl.read_csv(input_file, columns=["first", "last"], infer_schema_length=0)
 
     # Clean columns
@@ -189,30 +244,27 @@ def process_csv(input_file: str,
         pl.col("last").cast(pl.Utf8, strict=False).fill_null("")
     ])
 
-    # Convert once to Python lists for your custom logic
+    # Convert to Python lists (cheap in Polars) for our logic
     first_list = df_pl["first"].to_list()
     last_list  = df_pl["last"].to_list()
 
-    print(f"{len(first_list):.2f} seconds")
-    # Apply your original logic
+    # Normalize names (fast pure-Python; still parallelizable if needed, but inexpensive)
     first_clean, last_clean = process_names_batch_smart(first_list, last_list)
-    print(f"⏱️ Completed in {time.time() - start_time:.2f} seconds")
-    emails = generate_emails_smart_batch(first_clean, last_clean, domain)
-    print(f"⏱️ Completed in {time.time() - start_time:.2f} seconds")
 
-    # Add emails back to Polars DataFrame
+    # Parallel email generation
+    emails = generate_emails_smart_batch_parallel(first_clean, last_clean, domain, workers=workers, chunk_size=chunk_size)
+
+    # Back to Polars and write
     df_pl = df_pl.with_columns(pl.Series("email", emails))
-
-    # Write to CSV
     df_pl.write_csv(output_file)
 
     elapsed_time = time.time() - start_time
     print(f"\n✅ Emails generated and saved to {output_file}")
-    print(f"⏱️ Completed in {elapsed_time:.2f} seconds")
-
+    print(f"⏱️ Total time: {elapsed_time:.2f} seconds")
 
 # =========================================================
 # ======================== CLI ============================
 # =========================================================
 if __name__ == "__main__":
-    process_csv("names.csv", "generated_emails.csv", domain="example.com")
+    # Tune workers/chunk_size for your machine & data size
+    process_csv("names.csv", "generated_emails.csv", domain="example.com", workers=None, chunk_size=200_000)
