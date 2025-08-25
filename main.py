@@ -9,67 +9,71 @@ import time
 # =========================================================
 # =============== SMART BATCH PROCESSING ==================
 # =========================================================
-def normalize_safe(name: str, _norm=unicodedata.normalize, _isalpha=str.isalpha) -> str:
+alpha_re = re.compile(r'[^A-Za-z]+')
+
+def normalize_safe(name: str) -> str:
     if not name:
         return "user"
-    normalized = _norm("NFKD", str(name))
-    letters = [c for c in normalized if _isalpha(c)]
-    return "".join(letters) or "user"
+    cleaned = alpha_re.sub("", str(name))
+    return cleaned or "user"
 
 def process_names_batch_smart(first_names, last_names):
     return [normalize_safe(f) for f in first_names], [normalize_safe(l) for l in last_names]
 
 
 def generate_emails_smart_batch(first_names, last_names, domain):
-    """Optimized memory-safe smart batch email generation with pattern lookup."""
-
+    """Fully optimized, memory-safe email generation keeping original logic."""
+    
     n = len(first_names)
-
+    
     first_arr = np.array(first_names, dtype=object)
     last_arr  = np.array(last_names, dtype=object)
     fallback_initials = np.array(['a', 'b', 'c', 'd'])
-
+    
     # ---------------- Precompute randomness ----------------
     random_nums = np.random.choice([True, False], n)
     numbers = np.where(random_nums, np.random.randint(1, 10000, n).astype(str), np.array(['']*n))
-
+    
     casing = np.random.choice([True, False], n*6)
     pattern_indices = np.random.randint(0, 75, n)
     letter_indices = np.random.randint(0, 10, n*4)
-
+    
     fi_indices = np.random.randint(0, 4, n)
     li_indices = np.random.randint(0, 4, n)
-
+    
     # ---------------- Compute first & last initials ----------------
     fi_arr = np.array([f[0] if f else fallback_initials[fi_indices[i]] for i, f in enumerate(first_arr)], dtype=object)
     li_arr = np.array([l[0] if l else fallback_initials[li_indices[i]] for i, l in enumerate(last_arr)], dtype=object)
-
+    
     # ---------------- Compute random 2-letter combos ----------------
+    li_idx = np.arange(n) * 4
     def random_pair(arr, idx_base):
-        res = []
-        for i, s in enumerate(arr):
+        res = np.empty(n, dtype=object)
+        for i in range(n):
+            s = arr[i]
             if len(s) >= 2:
                 idx1 = letter_indices[idx_base[i]] % len(s)
                 idx2 = letter_indices[idx_base[i]+1] % len(s)
-                res.append(s[idx1] + s[idx2])
+                res[i] = s[idx1] + s[idx2]
             else:
-                res.append(s)
-        return np.array(res, dtype=object)
-
-    li_idx = np.arange(n) * 4
+                res[i] = s
+        return res
+    
     rfn_arr = random_pair(first_arr, li_idx)
     rln_arr = random_pair(last_arr, li_idx + 2)
-
-    # ---------------- Apply casing safely ----------------
-    fn_arr  = np.array([s.lower() if c else s for s, c in zip(first_arr, casing[0::6])], dtype=object)
-    ln_arr  = np.array([s.lower() if c else s for s, c in zip(last_arr, casing[1::6])], dtype=object)
-    fi_arr  = np.array([s.lower() if c else s for s, c in zip(fi_arr, casing[2::6])], dtype=object)
-    li_arr  = np.array([s.lower() if c else s for s, c in zip(li_arr, casing[3::6])], dtype=object)
-    rfn_arr = np.array([s.lower() if c else s for s, c in zip(rfn_arr, casing[4::6])], dtype=object)
-    rln_arr = np.array([s.lower() if c else s for s, c in zip(rln_arr, casing[5::6])], dtype=object)
-
+    
+    # ---------------- Apply casing ----------------
+    def apply_casing(arr, flags):
+        return np.array([s.lower() if f else s for s,f in zip(arr, flags)], dtype=object)
+    
+    fn_arr  = apply_casing(first_arr, casing[0::6])
+    ln_arr  = apply_casing(last_arr, casing[1::6])
+    fi_arr  = apply_casing(fi_arr, casing[2::6])
+    li_arr  = apply_casing(li_arr, casing[3::6])
+    rfn_arr = apply_casing(rfn_arr, casing[4::6])
+    rln_arr = apply_casing(rln_arr, casing[5::6])
+    
     # ---------------- Precompute 75 pattern functions ----------------
-    # Each lambda takes fn, ln, fi, li, rfn, rln, num and returns local part
     patterns = [
         lambda fn, ln, fi, li, rfn, rln, num: f"{fn}{num}",
         lambda fn, ln, fi, li, rfn, rln, num: f"{ln}{num}",
@@ -148,15 +152,17 @@ def generate_emails_smart_batch(first_names, last_names, domain):
         lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{num}_{fn}",
         lambda fn, ln, fi, li, rfn, rln, num: f"{li}_{num}_{fi}"
     ]
-
+    
     # ---------------- Generate emails ----------------
-    emails = np.array([
-        patterns[p](fn_arr[i], ln_arr[i], fi_arr[i], li_arr[i], rfn_arr[i], rln_arr[i], numbers[i]) + f"@{domain}"
-        if first_arr[i] or last_arr[i] else
-        f"{fi_arr[i]}{li_arr[i]}{numbers[i]}@{domain}"
+    emails_local = np.array([
+        patterns[p](fn_arr[i], ln_arr[i], fi_arr[i], li_arr[i], rfn_arr[i], rln_arr[i], numbers[i])
+        if first_arr[i] or last_arr[i] else f"{fi_arr[i]}{li_arr[i]}{numbers[i]}"
         for i, p in enumerate(pattern_indices)
     ], dtype=object)
-
+    
+    # ---------------- Add domain ----------------
+    emails = np.char.add(emails_local, f"@{domain}")
+    
     return emails
 
 
