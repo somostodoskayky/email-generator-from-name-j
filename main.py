@@ -32,14 +32,12 @@ def _generate_chunk(first_chunk, last_chunk, domain, seed):
     fallback_initials = np.array(['a', 'b', 'c', 'd'], dtype=object)
 
     # Precompute randomness
-    random_nums = rng.choice([True, False], n)
-    # numbers are strings when used, else empty string
-    numbers = np.where(random_nums,
-                       rng.integers(1, 10000, n).astype(str),
-                       np.empty(n, dtype=object))
-    numbers[~random_nums] = ""
+    # numbers are mandatory, 1-4 digits, always at the end
+    numbers = rng.integers(1, 10000, n).astype(str)
 
-    pattern_indices = rng.integers(0, 150, n)
+    # Lowercase everything (enforce lowercase-only rule)
+    casing = rng.choice([True, False], n * 6)
+    pattern_indices = rng.integers(0, 75, n)
     letter_indices = rng.integers(0, 10, n * 4)  # reused in random pairs
 
     fi_indices = rng.integers(0, 4, n)
@@ -75,56 +73,29 @@ def _generate_chunk(first_chunk, last_chunk, domain, seed):
         else:
             rln_arr[i] = l
 
-    # Always lowercase all name components for consistent email format
-    fn_arr  = np.array([s.lower() for s in first_arr], dtype=object)
-    ln_arr  = np.array([s.lower() for s in last_arr], dtype=object)
-    fi_arr  = np.array([s.lower() for s in fi_arr], dtype=object)
-    li_arr  = np.array([s.lower() for s in li_arr], dtype=object)
-    rfn_arr = np.array([s.lower() for s in rfn_arr], dtype=object)
-    rln_arr = np.array([s.lower() for s in rln_arr], dtype=object)
+    # Apply casing flags (lower if flag True)
+    fn_arr  = np.array([str(s).lower() for s in first_arr], dtype=object)
+    ln_arr  = np.array([str(s).lower() for s in last_arr], dtype=object)
+    fi_arr  = np.array([str(s).lower() for s in fi_arr], dtype=object)
+    li_arr  = np.array([str(s).lower() for s in li_arr], dtype=object)
+    rfn_arr = np.array([str(s).lower() for s in rfn_arr], dtype=object)
+    rln_arr = np.array([str(s).lower() for s in rln_arr], dtype=object)
 
-    # Compact long names (>4 chars) to a 3-letter random sample (no replacement)
-    def compact_array(arr):
-        out = np.empty(n, dtype=object)
-        for i, s in enumerate(arr):
-            if len(s) > 4:
-                k = 3 if len(s) >= 3 else len(s)
-                idxs = rng.choice(len(s), size=k, replace=False)
-                out[i] = "".join(s[j] for j in idxs)
+    # Helper to safely concat, preventing double '.' or '_'
+    def safe_concat(*parts):
+        out = ""
+        for part in parts:
+            if not part:
+                continue
+            if out and out[-1] in "._" and part[0] in "._":
+                out += part[1:]
             else:
-                out[i] = s
+                out += part
         return out
 
-    fnc_arr = compact_array(fn_arr)
-    lnc_arr = compact_array(ln_arr)
-
-    # 75 pattern functions (same logic preserved)
-    def safe_concat(*parts):
-        """Safely concatenate parts, avoiding double special characters."""
-        result = ""
-        for part in parts:
-            if part:  # Only add non-empty parts
-                if result and result[-1] in '._' and part[0] in '._':
-                    # Avoid double special characters
-                    result += part[1:] if len(part) > 1 else ""
-                else:
-                    result += part
-        return result
-
+    # Patterns: only '.' and '_' as separators, 1 or 2 separators total, and number at end
     patterns = [
-        # Basic patterns (existing)
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, ln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, ln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, fn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, fi, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, fn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, fi, num),
-        
-        # Dot-separated patterns (existing)
+        # One separator (dot)
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, ".", ln, num),
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, ".", ln, num),
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, ".", li, num),
@@ -133,8 +104,7 @@ def _generate_chunk(first_chunk, last_chunk, domain, seed):
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, ".", fi, num),
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, ".", fn, num),
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, ".", fi, num),
-        
-        # Underscore-separated patterns (existing)
+        # One separator (underscore)
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, "_", ln, num),
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "_", ln, num),
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, "_", li, num),
@@ -143,159 +113,32 @@ def _generate_chunk(first_chunk, last_chunk, domain, seed):
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, "_", fi, num),
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "_", fn, num),
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "_", fi, num),
-        
-        # Random letter patterns (existing)
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rfn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rfn, rln, num),
+        # Two separators (dot)
+        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, ".", li, ".", fi, num),
+        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, ".", ln, ".", li, num),
+        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, ".", fi, ".", fn, num),
+        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, ".", fn, ".", fi, num),
+        # Two separators (underscore)
+        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, "_", li, "_", fi, num),
+        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "_", ln, "_", li, num),
+        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, "_", fi, "_", fn, num),
+        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "_", fn, "_", fi, num),
+        # One separator using random letters
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rfn, ".", ln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, rln, num),
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, ".", rln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rfn, li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rfn, ".", li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, ".", li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rln, fn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rln, ".", fn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rln, fi, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rln, ".", fi, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, rfn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, ".", rfn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, fi, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, ".", fi, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rfn, "_", ln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "_", rln, num),
         lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rfn, "_", li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "_", li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rln, "_", fn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(rln, "_", fi, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "_", rfn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "_", fi, num),
-        
-        # Number in middle patterns (existing)
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, num, ln),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, num, ln),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, num, li),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, num, li),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, num, fn),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, num, fi),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, num, fn),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, num, fi),
-        
-        # Double-dot patterns (existing)
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, ".", num, ".", ln),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, ".", num, ".", ln),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, ".", num, ".", li),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, ".", num, ".", li),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, ".", num, ".", fn),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, ".", num, ".", fi),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, ".", num, ".", fn),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, ".", num, ".", fi),
-        
-        # Double-underscore patterns (existing)
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, "_", num, "_", ln),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "_", num, "_", ln),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, "_", num, "_", li),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "_", num, "_", li),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, "_", num, "_", fn),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, "_", num, "_", fi),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "_", num, "_", fn),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "_", num, "_", fi),
-        
-        # NEW: Human-like corporate patterns (initials-first variations)
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, ln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, fn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, fn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, ln, num),
-        
-        # NEW: Common corporate abbreviations
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:2], ln[:2], num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:2], ln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, ln[:2], num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, ln[:2], num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:2], li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:3], ln[:3], num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:3], ln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, ln[:3], num),
-        
-        # NEW: Mixed abbreviation patterns
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:2], ".", ln[:2], num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:2], "_", ln[:2], num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, ".", ln[:2], num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "_", ln[:2], num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:2], ".", li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:2], "_", li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:3], ".", ln[:3], num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn[:3], "_", ln[:3], num),
-        
-        # NEW: Number-first patterns (common in some companies)
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(num, fn, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(num, ln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(num, fi, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(num, li, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(num, fn, ln, num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(num, fi, li, num),
-        
-        # NEW: Mixed separator patterns
-        # (Removed hyphen mixes; only '.' and '_' allowed)
- 
-        # NEW: Department-style patterns (common in large companies)
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat("user", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat("emp", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat("staff", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat("team", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat("dev", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat("admin", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat("support", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat("help", num),
-        
-        # NEW: Year-based patterns (common in some companies)
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, "23", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, "23", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "23", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "23", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, "24", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, "24", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "24", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "24", num),
-        
-        # NEW: Simple variations (very common in real companies)
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, "1", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, "1", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "1", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "1", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fn, "2", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(ln, "2", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "2", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(li, "2", num),
-        
-        # NEW: Common corporate initials patterns
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, "1", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, "2", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, "3", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, "4", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, "5", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, "6", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, "7", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, "8", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, "9", num),
-        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, li, "0", num),
+        lambda fn, ln, fi, li, rfn, rln, num: safe_concat(fi, "_", rln, num),
     ]
 
-    # Recompute pattern indices based on actual pattern count
-    max_idx = len(patterns)
-    pattern_indices = rng.integers(0, max_idx, n)
+    # Compute pattern indices based on actual pattern count
+    pattern_indices = rng.integers(0, len(patterns), n)
 
     # Build locals per pattern (single Python loop over rows)
     local_parts = np.empty(n, dtype=object)
     for i in range(n):
         if (first_arr[i] or last_arr[i]):
             p = pattern_indices[i]
-            local_parts[i] = patterns[p](fnc_arr[i], lnc_arr[i], fi_arr[i], li_arr[i], rfn_arr[i], rln_arr[i], numbers[i])
+            local_parts[i] = patterns[p](fn_arr[i], ln_arr[i], fi_arr[i], li_arr[i], rfn_arr[i], rln_arr[i], numbers[i])
         else:
             local_parts[i] = f"{fi_arr[i]}{li_arr[i]}{numbers[i]}"
 
@@ -367,11 +210,9 @@ def process_csv(input_file: str,
 
     # Normalize names (fast pure-Python; still parallelizable if needed, but inexpensive)
     first_clean, last_clean = process_names_batch_smart(first_list, last_list)
-    print(f"⏱️ Completed in {time.time() - start_time:.2f} seconds")
 
     # Parallel email generation
     emails = generate_emails_smart_batch_parallel(first_clean, last_clean, domain, workers=workers, chunk_size=chunk_size)
-    print(f"⏱️ Completed in {time.time() - start_time:.2f} seconds")
 
     # Back to Polars and write
     df_pl = df_pl.with_columns(pl.Series("email", emails))
@@ -387,3 +228,4 @@ def process_csv(input_file: str,
 if __name__ == "__main__":
     # Tune workers/chunk_size for your machine & data size
     process_csv("names.csv", "generated_emails.csv", domain="example.com", workers=None, chunk_size=200_000)
+
