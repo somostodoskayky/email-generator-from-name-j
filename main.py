@@ -234,4 +234,3 @@ def process_csv(input_file: str,
 if __name__ == "__main__":
     # Tune workers/chunk_size for your machine & data size
     process_csv("names.csv", "generated_emails.csv", domain="example.com", workers=None, chunk_size=200_000)
-
